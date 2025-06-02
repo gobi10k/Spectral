@@ -146,7 +146,11 @@ void SpectralVocoderAudioProcessor::prepareToPlay (double sampleRate, int sample
 {
     // Analyzer spec: Using 2 channels for its internal processing, can be adapted.
     // It processes modulator and carrier separately, each assumed mono for FFT.
-    juce::dsp::ProcessSpec analyzerSpec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), 2 }; // Max 2 ch per input buffer view
+    // The '2' here refers to the number of channels SpectralAnalyzer's internal buffers might be sized for if it were to handle stereo FFT directly.
+    // However, SpectralAnalyzer's processInputBuffer currently takes a mono view (channel 0) of the passed AudioBuffer.
+    // So, the numChannels in this spec is more about what SpectralAnalyzer itself expects for its internal setup.
+    // Let's assume it's designed to handle up to 2 channels internally if it were to do stereo analysis, even if current use is mono.
+    juce::dsp::ProcessSpec analyzerSpec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), static_cast<juce::uint32>(getTotalNumInputChannels()) };
     spectralAnalyzer->prepare(analyzerSpec);
     
     // Verify actual FFT size from analyzer after its preparation, if it could change
@@ -156,7 +160,7 @@ void SpectralVocoderAudioProcessor::prepareToPlay (double sampleRate, int sample
     lastNumBands = initialNumBands; // Store initial value
 
     // Engine spec: Outputting stereo
-    juce::dsp::ProcessSpec engineSpec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), getTotalNumOutputChannels() };
+    juce::dsp::ProcessSpec engineSpec { sampleRate, static_cast<juce::uint32>(samplesPerBlock), static_cast<juce::uint32>(getTotalNumOutputChannels()) };
     vocoderEngine->prepare(engineSpec, currentFFTSize, initialNumBands);
     DBG("PluginProcessor::prepareToPlay. SR: " << sampleRate << ", BS: " << samplesPerBlock << ", FFT: " << currentFFTSize << ", Bands: " << initialNumBands);
 }
@@ -218,24 +222,43 @@ void SpectralVocoderAudioProcessor::processBlock (juce::AudioBuffer<float>& buff
         return;
     }
 
-    // Create AudioBuffer views for modulator and carrier signals.
-    // These do not own the data, they point into the main plugin buffer.
-    // Modulator: channels 0, 1
-    // Carrier: channels 2, 3
-    // SpectralAnalyzer is set up to take mono inputs for its FFTs, it will use channel 0 of these buffers.
-    juce::AudioBuffer<float> modulatorSignalView(buffer.getArrayOfWritePointers(), 
-                                               2, // Number of channels in this view
-                                               buffer.getStartSample(), 
-                                               numSamples);
-    
-    juce::AudioBuffer<float> carrierSignalView(buffer.getArrayOfWritePointers() + 2, // Offset by 2 channels for carrier
-                                             2, // Number of channels in this view
-                                             buffer.getStartSample(),
-                                             numSamples);
+    // Create separate AudioBuffer instances for modulator and carrier.
+    // SpectralAnalyzer expects mono input (uses channel 0 of the passed buffer).
+    // We prepare stereo buffers here and pass them; SpectralAnalyzer will pick channel 0.
+    juce::AudioBuffer<float> modulatorSignalBuffer(2, numSamples);
+    juce::AudioBuffer<float> carrierSignalBuffer(2, numSamples);
+    modulatorSignalBuffer.clear(); // Ensure silence if not enough input channels
+    carrierSignalBuffer.clear();   // Ensure silence if not enough input channels
+
+    // Modulator (Inputs 1 & 2 - buffer channels 0 & 1)
+    // Copy channel 0 (Input 1) to modulatorSignalBuffer channel 0
+    if (totalNumInputChannels > 0) { // Input 1 available
+        modulatorSignalBuffer.copyFrom(0, 0, buffer, 0, 0, numSamples);
+    }
+    // Copy channel 1 (Input 2) to modulatorSignalBuffer channel 1
+    if (totalNumInputChannels > 1) { // Input 2 available
+        modulatorSignalBuffer.copyFrom(1, 0, buffer, 1, 0, numSamples);
+    } else if (totalNumInputChannels > 0) { // Only Input 1 available for modulator
+        modulatorSignalBuffer.copyFrom(1, 0, modulatorSignalBuffer, 0, 0, numSamples); // Copy L to R for modulator
+    }
+
+    // Carrier (Inputs 3 & 4 - buffer channels 2 & 3)
+    // Copy channel 2 (Input 3) to carrierSignalBuffer channel 0
+    if (totalNumInputChannels > 2) { // Input 3 available
+        carrierSignalBuffer.copyFrom(0, 0, buffer, 2, 0, numSamples);
+    }
+    // Copy channel 3 (Input 4) to carrierSignalBuffer channel 1
+    if (totalNumInputChannels > 3) { // Input 4 available
+        carrierSignalBuffer.copyFrom(1, 0, buffer, 3, 0, numSamples);
+    } else if (totalNumInputChannels > 2) { // Only Input 3 available for carrier
+        carrierSignalBuffer.copyFrom(1, 0, carrierSignalBuffer, 0, 0, numSamples); // Copy L to R for carrier
+    }
+    // Note: If totalNumInputChannels is <3, carrierSignalBuffer remains silent, which is acceptable.
+    // SpectralAnalyzer will process silence for carrier if carrierSignalBuffer is empty/silent.
 
     // Perform spectral analysis
     if (spectralAnalyzer) {
-        spectralAnalyzer->doAnalysis(modulatorSignalView, carrierSignalView);
+        spectralAnalyzer->doAnalysis(modulatorSignalBuffer, carrierSignalBuffer);
     }
 
     // Perform vocoding and synthesis
