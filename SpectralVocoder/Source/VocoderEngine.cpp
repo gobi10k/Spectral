@@ -19,6 +19,7 @@ void VocoderEngine::prepare(const juce::dsp::ProcessSpec& spec, int newfftSize, 
     sampleRate = spec.sampleRate;
     fftSize = newfftSize;
     currentNumBands = initialNumBands;
+    currentBlockSize = spec.maximumBlockSize; // Store for later use if needed
 
     jassert(sampleRate > 0);
     jassert(fftSize > 0 && (fftSize & (fftSize - 1)) == 0); // Power of 2 check
@@ -30,10 +31,13 @@ void VocoderEngine::prepare(const juce::dsp::ProcessSpec& spec, int newfftSize, 
 
     hopSize = fftSize / 4; // Common hop size for OLA
 
-    modulatorBandEnvelopeFollowers.resize(currentNumBands);
-    for (auto& follower : modulatorBandEnvelopeFollowers)
+    modulatorBandFilters.resize(currentNumBands);
+    for (auto& filter : modulatorBandFilters)
     {
-        follower.prepare(spec); // Base spec is fine, attack/release set in process
+        // BallisticsFilter processes single samples; spec.numChannels = 1.
+        // spec.maximumBlockSize for BallisticsFilter isn't critical if processing sample-by-sample,
+        // but using the plugin's block size is fine.
+        filter.prepare({ sampleRate, currentBlockSize, 1 });
     }
 
     modulatorBandMagnitudes.resize(currentNumBands, 0.0f);
@@ -62,11 +66,13 @@ void VocoderEngine::setNumBands(int newNumBands)
     {
         currentNumBands = newNumBands;
         if (prepared) {
-            modulatorBandEnvelopeFollowers.resize(currentNumBands);
-            juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(fftSize), 1 }; // Dummy spec for followers
-            for (auto& follower : modulatorBandEnvelopeFollowers)
+            modulatorBandFilters.resize(currentNumBands);
+            // Use stored sampleRate and currentBlockSize for preparing new filters
+            juce::dsp::ProcessSpec filterSpec { sampleRate, currentBlockSize, 1 };
+            for (auto& filter : modulatorBandFilters)
             {
-                follower.prepare(spec); 
+                // Check if filter is already prepared perhaps, though re-preparing is safe.
+                filter.prepare(filterSpec); 
             }
             modulatorBandMagnitudes.resize(currentNumBands, 0.0f);
             updateBandInformation();
@@ -141,12 +147,6 @@ void VocoderEngine::process(const std::vector<float>& modulatorSpectrumComplex, 
     jassert(modulatorSpectrumComplex.size() == fftSize);
     jassert(carrierSpectrumComplex.size() == fftSize);
 
-    // Update envelope follower times (important if they are parameters)
-    for (auto& follower : modulatorBandEnvelopeFollowers) {
-        follower.setAttackTime(attackTimeMs);
-        follower.setReleaseTime(releaseTimeMs);
-    }
-
     // --- Modulator Analysis per Band (Simpler Spectral Approach) ---
     for (int i = 0; i < currentNumBands; ++i)
     {
@@ -166,8 +166,13 @@ void VocoderEngine::process(const std::vector<float>& modulatorSpectrumComplex, 
             bandEnergy /= static_cast<float>(numBinsInBand);
         }
         
-        // Apply envelope follower to this band's energy
-        modulatorBandMagnitudes[i] = modulatorBandEnvelopeFollowers[i].processSample(bandEnergy);
+        // Apply ballistics filter to this band's energy
+        auto& bandFilter = modulatorBandFilters[i];
+        bandFilter.setAttackTime(attackTimeMs);    // Set times each process call, or only when they change
+        bandFilter.setReleaseTime(releaseTimeMs);
+        // BallisticsFilter processSample expects a raw sample, not an AudioBlock
+        float envelopeValue = bandFilter.processSample(0, bandEnergy); // Process the single energy value for channel 0
+        modulatorBandMagnitudes[i] = envelopeValue;
     }
 
     // --- Carrier Processing & Synthesis (Simpler Spectral Approach) ---

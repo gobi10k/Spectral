@@ -36,9 +36,9 @@ private:
     juce::dsp::FFT ifft;
     juce::dsp::WindowingFunction<float> synthesisWindow;
 
-    // For "Simpler Spectral Approach" - we don't use a bank of BPFs on time-domain carrier here.
-    // Instead, we work with spectral bands.
-    std::vector<juce::dsp::EnvelopeFollower<float>> modulatorBandEnvelopeFollowers;
+    // For "Simpler Spectral Approach" - we work with spectral bands.
+    // Using BallisticsFilter for smoothing modulator band energies.
+    std::vector<juce::dsp::BallisticsFilter<float>> modulatorBandFilters;
 
     juce::AudioBuffer<float> ifftOutputBuffer;        // Time-domain data after IFFT
     juce::AudioBuffer<float> vocodedOverlapAddBuffer; // Circular buffer for OLA synthesis
@@ -48,6 +48,7 @@ private:
     int currentNumBands = 20;
     int fftSize = 0;
     double sampleRate = 0.0;
+    juce::uint32 currentBlockSize = 0; // To store block size for BallisticsFilter prepare
 
     // Store modulator band magnitudes after envelope following
     std::vector<float> modulatorBandMagnitudes; 
