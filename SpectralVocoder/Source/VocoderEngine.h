@@ -1,7 +1,7 @@
 #pragma once
 
 #include <juce_dsp/juce_dsp.h>
-#include <juce_dsp/effects/juce_EnvelopeFollower.h> // Corrected include for EnvelopeFollower
+// #include <juce_dsp/effects/juce_EnvelopeFollower.h> // Removed this line
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <vector>
 
